@@ -446,21 +446,15 @@
         <span id="mode-integ" class="mode-pill">Integ</span>
       </div>
 
-      <!-- Botón audio -->
-      <button
-        id="audio-toggle"
-        class="ctrl-btn active"
-        aria-pressed="true"
-        aria-label="Síntesis de voz activada. Presiona para desactivar"
-        title="Activar/desactivar síntesis de voz"
-      >
-        <svg id="audio-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+      <!-- Indicador de audio siempre activo -->
+      <div class="ctrl-btn active" aria-hidden="true" title="Síntesis de voz activa">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
           <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/>
           <path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>
           <path d="M15.54 8.46a5 5 0 0 1 0 7.07"/>
         </svg>
         Audio
-      </button>
+      </div>
     </div>
   </header>
 
@@ -579,8 +573,8 @@
   <footer class="shortcuts-bar" aria-label="Atajos de teclado disponibles">
     <div class="shortcut-chip"><kbd>Enter</kbd> Calcular</div>
     <div class="shortcut-chip"><kbd>Esc</kbd> Borrar</div>
-    <div class="shortcut-chip"><kbd>↑</kbd> Historial anterior</div>
-    <div class="shortcut-chip"><kbd>Alt+A</kbd> Audio</div>
+    <div class="shortcut-chip"><kbd>↑↓</kbd> Historial (narrado)</div>
+    <div class="shortcut-chip"><kbd>Tab</kbd> Navegar (narrado)</div>
   </footer>
 
 </main>
@@ -1044,33 +1038,59 @@ const SymCalc = (() => {
 })();
 
 /* ╔═══════════════════════════════════════════════════════════════╗
-   ║  MÓDULO DE SÍNTESIS DE VOZ                                   ║
+   ║  MÓDULO DE SÍNTESIS DE VOZ — siempre activo                  ║
+   ║  Carga diferida de voces para compatibilidad entre           ║
+   ║  navegadores (Chrome carga voces de forma asíncrona)         ║
    ╚═══════════════════════════════════════════════════════════════╝ */
 const Voice = (() => {
-  let enabled = true;
-  let synth = window.speechSynthesis;
+  const synth = window.speechSynthesis;
+  let spanishVoice = null;
+  let voicesLoaded  = false;
+
+  /* Carga voces — Chrome las expone de forma asíncrona */
+  function loadVoices() {
+    const all = synth.getVoices();
+    if (all.length > 0) {
+      spanishVoice = all.find(v => v.lang === 'es-ES')
+                  || all.find(v => v.lang.startsWith('es'))
+                  || null;
+      voicesLoaded = true;
+    }
+  }
+
+  loadVoices();
+  if (typeof speechSynthesis !== 'undefined' && speechSynthesis.onvoiceschanged !== undefined) {
+    speechSynthesis.onvoiceschanged = loadVoices;
+  }
 
   function speak(text, priority = false) {
-    if (!enabled || !synth) return;
+    if (!synth) return;
+    /* Desbloqueo de audio en Chrome: primer speak debe ocurrir
+       dentro de un gesto de usuario. Para el saludo inicial usamos
+       un utterance vacío de duración cero para "calentar" el motor */
     if (priority) synth.cancel();
-    const utterance = new SpeechSynthesisUtterance(text);
-    utterance.lang = 'es-ES';
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
-    // Intentar voz en español
-    const voices = synth.getVoices();
-    const spanish = voices.find(v => v.lang.startsWith('es'));
-    if (spanish) utterance.voice = spanish;
-    synth.speak(utterance);
+    if (!voicesLoaded) loadVoices();
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang  = 'es-ES';
+    u.rate  = 0.95;
+    u.pitch = 1;
+    if (spanishVoice) u.voice = spanishVoice;
+    synth.speak(u);
   }
 
-  function toggle() {
-    enabled = !enabled;
-    if (!enabled && synth) synth.cancel();
-    return enabled;
+  /* Desbloquea el motor de voz en el primer clic/tecla del usuario */
+  function unlock() {
+    if (!synth) return;
+    const u = new SpeechSynthesisUtterance('');
+    u.volume = 0;
+    synth.speak(u);
+    document.removeEventListener('click',   unlock);
+    document.removeEventListener('keydown', unlock);
   }
+  document.addEventListener('click',   unlock, { once: true });
+  document.addEventListener('keydown', unlock, { once: true });
 
-  return { speak, toggle, isEnabled: () => enabled };
+  return { speak };
 })();
 
 /* ╔═══════════════════════════════════════════════════════════════╗
@@ -1088,7 +1108,6 @@ const Calc = (() => {
   const resultEl   = document.getElementById('result-display');
   const srRegion   = document.getElementById('sr-announce');
   const histList   = document.getElementById('history-list');
-  const audioBtn   = document.getElementById('audio-toggle');
   const modePills  = {
     num:   document.getElementById('mode-num'),
     deriv: document.getElementById('mode-deriv'),
@@ -1301,14 +1320,42 @@ const Calc = (() => {
         e.preventDefault();
         const idx = Math.min(state.histIndex + 1, state.history.length - 1);
         state.histIndex = idx;
-        if (state.history[idx]) { input.value = state.history[idx].expr; }
+        if (state.history[idx]) {
+          input.value = state.history[idx].expr;
+          Voice.speak(`Historial: ${state.history[idx].expr}, resultado: ${state.history[idx].result}`, true);
+        } else {
+          Voice.speak('Sin más historial', true);
+        }
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault();
         const idx = Math.max(state.histIndex - 1, -1);
         state.histIndex = idx;
-        input.value = idx >= 0 && state.history[idx] ? state.history[idx].expr : '';
+        if (idx >= 0 && state.history[idx]) {
+          input.value = state.history[idx].expr;
+          Voice.speak(`Historial: ${state.history[idx].expr}, resultado: ${state.history[idx].result}`, true);
+        } else {
+          input.value = '';
+          Voice.speak('Campo de entrada vacío', true);
+        }
       }
+    });
+
+    /* ── Tab global: narrar el elemento que recibe foco ─────── */
+    document.addEventListener('keydown', e => {
+      if (e.key !== 'Tab') return;
+      /* Esperamos al siguiente frame para leer el elemento YA enfocado */
+      requestAnimationFrame(() => {
+        const el = document.activeElement;
+        if (!el) return;
+        const label =
+          el.getAttribute('aria-label') ||
+          el.getAttribute('title')      ||
+          el.textContent?.trim()        ||
+          el.placeholder                ||
+          '';
+        if (label) Voice.speak(label, true);
+      });
     });
 
     input.addEventListener('input', () => {
@@ -1318,23 +1365,6 @@ const Calc = (() => {
 
     // Botón calcular (=)
     document.querySelector('[data-action="calc"]').addEventListener('click', calculate);
-
-    // Audio toggle
-    audioBtn.addEventListener('click', () => {
-      const now = Voice.toggle();
-      audioBtn.setAttribute('aria-pressed', String(now));
-      audioBtn.classList.toggle('active', now);
-      audioBtn.setAttribute('aria-label', now
-        ? 'Síntesis de voz activada. Presiona para desactivar'
-        : 'Síntesis de voz desactivada. Presiona para activar'
-      );
-      if (now) Voice.speak('Síntesis de voz activada', true);
-    });
-
-    // Atajo Alt+A para audio
-    document.addEventListener('keydown', e => {
-      if (e.altKey && e.key === 'a') { audioBtn.click(); }
-    });
 
     // Limpiar historial
     document.getElementById('clear-history-btn').addEventListener('click', () => {
@@ -1357,10 +1387,15 @@ const Calc = (() => {
       input.focus();
     });
 
-    // Anuncio inicial
-    setTimeout(() => {
-      Voice.speak('Calculadora científica accesible lista. Usa Tab para navegar, Enter para calcular.', true);
-    }, 600);
+    /* Saludo inicial: se reproduce en el primer gesto del usuario
+       porque los navegadores bloquean audio sin interacción previa */
+    function greet() {
+      Voice.speak('Calculadora científica accesible lista. Usa Tab para navegar por los botones y Enter para calcular.', true);
+      document.removeEventListener('click',   greet);
+      document.removeEventListener('keydown', greet);
+    }
+    document.addEventListener('click',   greet, { once: true });
+    document.addEventListener('keydown', greet, { once: true });
 
     input.focus();
   }
